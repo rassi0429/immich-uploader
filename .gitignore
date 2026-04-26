@@ -1,0 +1,33 @@
+# Cargo build artifacts
+/target
+
+# Cargo.lock は bin クレートなのでコミット対象 (除外しない)
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Local environment
+.env
+.env.local
+.envrc
+
+# ログ・一時出力
+*.log
+*.tmp
+
+# rust-analyzer の分析キャッシュ
+.rust-analyzer/
+
+# macOS の Finder メタデータ
+._*
