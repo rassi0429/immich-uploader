@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows binary
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like "refs/tags/*") {
+            $tag = $env:GITHUB_REF -replace "^refs/tags/", ""
+          } else {
+            $tag = "${{ github.event.inputs.tag }}"
+          }
+          if (-not $tag) { throw "tag is empty" }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Tag: $tag"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Run tests
+        run: cargo test --bins --release --locked
+
+      - name: Stage artifact
+        id: stage
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          $name = "immich-auto-uploader-$tag-windows-x64.exe"
+          Copy-Item "target/release/immich-auto-uploader.exe" $name
+          "name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Get-FileHash $name -Algorithm SHA256 | Format-List
+
+      - name: Generate SHA256
+        shell: pwsh
+        run: |
+          $name = "${{ steps.stage.outputs.name }}"
+          $hash = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Out-File -FilePath "$name.sha256" -Encoding ascii
+
+      - name: Upload artifact (CI)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.name }}
+          path: |
+            ${{ steps.stage.outputs.name }}
+            ${{ steps.stage.outputs.name }}.sha256
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            ${{ steps.stage.outputs.name }}
+            ${{ steps.stage.outputs.name }}.sha256

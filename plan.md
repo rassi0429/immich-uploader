@@ -323,6 +323,26 @@ let stdout = child.stdout.take().unwrap();
 - 配布形式は単一の `.exe` (まずは)。インストーラ化は後回し
 - アイコンリソースは `winres` クレートで埋め込み (任意、優先度低)
 
+### 9.1 GitHub Actions による自動リリース
+
+[.github/workflows/release.yml](.github/workflows/release.yml) を配置し、タグ push をトリガーに自動ビルド + GitHub Release を作成する。
+
+- **トリガー**: `v*` 形式のタグ push (例: `v0.1.0`) または手動実行 (workflow_dispatch)
+- **ランナー**: `windows-latest`
+- **ステップ**: checkout → Rust stable → cargo cache → `cargo build --release --locked` → `cargo test --bins --release --locked` → リネーム (`immich-auto-uploader-vX.Y.Z-windows-x64.exe`) → SHA256 生成 → Actions Artifact + GitHub Release アップロード
+- **権限**: `permissions.contents: write` を workflow に明記 (Release 作成に必要)
+- **必要な前提条件**:
+  - リポジトリ Settings → Actions → General → Workflow permissions が「Read and write permissions」になっていること (または上記の `permissions:` 設定)
+  - `Cargo.lock` をコミット済 (`--locked` で再現性確保)
+- **リリース手順**:
+  ```bash
+  # バージョンを Cargo.toml の version に合わせる
+  git tag v0.1.0
+  git push origin v0.1.0
+  # → Actions が走り、自動で Release が作成される
+  ```
+- リリースノートは `generate_release_notes: true` で前回タグからの commit 一覧を自動生成
+
 ## 10. 開発の進め方 (推奨ステップ)
 
 Claude Code に渡す際、以下の順で実装すると詰まりにくい。
