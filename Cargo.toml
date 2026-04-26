@@ -9,12 +9,14 @@ directories = "6.0.0"
 eframe = "0.33.3"
 image = "0.25.10"
 kill_tree = { version = "0.2.4", features = ["tokio"] }
+raw-window-handle = "0.6.2"
 rfd = "0.17.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["process", "io-util", "rt-multi-thread", "sync", "macros", "time"] }
 tracing = "0.1.44"
+tracing-appender = "0.2.5"
 tracing-subscriber = "0.3.23"
 tray-icon = "0.22.1"
 uuid = { version = "1.23.1", features = ["v4"] }

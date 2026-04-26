@@ -10,7 +10,16 @@ use std::sync::{Arc, Mutex};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tray_icon::TrayIconEvent;
-use tray_icon::menu::MenuEvent;
+use tray_icon::menu::{MenuEvent, MenuId};
+
+#[derive(Debug, Clone)]
+enum TrayAction {
+    Show,
+    SyncAll,
+    PauseAll,
+    ResumeAll,
+    Quit,
+}
 
 const LOG_LIMIT: usize = 5_000;
 
@@ -113,13 +122,16 @@ pub struct App {
     selected_tab: LogTab,
     edit_folder: Option<String>,
 
+    #[allow(dead_code)] // drop で TrayIcon が消えるため保持必須
     tray: Option<TrayState>,
     tray_pause_all_active: bool,
+    tray_action_queue: Arc<Mutex<Vec<TrayAction>>>,
 
     pending_save: bool,
 
     quit_requested: bool,
     minimized_to_tray: bool,
+    last_applied_skip_taskbar: bool,
 }
 
 #[derive(Clone)]
@@ -144,6 +156,7 @@ impl App {
         warning: Option<String>,
         rt: Handle,
         tray: Option<TrayState>,
+        ctx: egui::Context,
     ) -> Self {
         let (log_tx, log_rx) = unbounded_channel();
         let cli_status = Arc::new(Mutex::new(CliStatus::Unknown));
@@ -157,6 +170,19 @@ impl App {
         }
 
         let server_url_input = config.server_url.clone();
+        let tray_action_queue: Arc<Mutex<Vec<TrayAction>>> = Arc::new(Mutex::new(Vec::new()));
+
+        if let Some(t) = tray.as_ref() {
+            spawn_tray_listener(
+                ctx,
+                tray_action_queue.clone(),
+                t.menu_show_id.clone(),
+                t.menu_sync_all_id.clone(),
+                t.menu_pause_all_id.clone(),
+                t.menu_resume_all_id.clone(),
+                t.menu_quit_id.clone(),
+            );
+        }
 
         let mut app = Self {
             config,
@@ -175,9 +201,11 @@ impl App {
             edit_folder: None,
             tray,
             tray_pause_all_active: false,
+            tray_action_queue,
             pending_save: false,
             quit_requested: false,
             minimized_to_tray: false,
+            last_applied_skip_taskbar: false,
         };
 
         if let Some(w) = warning {
@@ -423,26 +451,22 @@ impl App {
     }
 
     fn handle_tray_events(&mut self, ctx: &egui::Context) {
-        let menu_rx = MenuEvent::receiver();
-        while let Ok(ev) = menu_rx.try_recv() {
-            let id = ev.id();
-            if id == &self.tray_show_id() {
-                self.show_window(ctx);
-            } else if id == &self.tray_sync_all_id() {
-                self.sync_all();
-            } else if id == &self.tray_pause_all_id() {
-                self.pause_all();
-            } else if id == &self.tray_resume_all_id() {
-                self.resume_all();
-            } else if id == &self.tray_quit_id() {
-                self.quit_requested = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-        }
-        let tray_rx = TrayIconEvent::receiver();
-        while let Ok(ev) = tray_rx.try_recv() {
-            if let TrayIconEvent::DoubleClick { .. } = ev {
-                self.show_window(ctx);
+        let actions: Vec<TrayAction> =
+            std::mem::take(&mut *self.tray_action_queue.lock().unwrap());
+        for action in actions {
+            tracing::info!("processing tray action: {:?}", action);
+            self.all_log
+                .push_system(format!("[tray] action={action:?}"));
+            match action {
+                TrayAction::Show => self.show_window(ctx),
+                TrayAction::SyncAll => self.sync_all(),
+                TrayAction::PauseAll => self.pause_all(),
+                TrayAction::ResumeAll => self.resume_all(),
+                TrayAction::Quit => {
+                    self.quit_requested = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
         }
     }
@@ -450,38 +474,8 @@ impl App {
     fn show_window(&mut self, ctx: &egui::Context) {
         self.minimized_to_tray = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-    }
-
-    fn tray_show_id(&self) -> tray_icon::menu::MenuId {
-        self.tray
-            .as_ref()
-            .map(|t| t.menu_show_id.clone())
-            .unwrap_or(tray_icon::menu::MenuId::new("show"))
-    }
-    fn tray_sync_all_id(&self) -> tray_icon::menu::MenuId {
-        self.tray
-            .as_ref()
-            .map(|t| t.menu_sync_all_id.clone())
-            .unwrap_or(tray_icon::menu::MenuId::new("sync_all"))
-    }
-    fn tray_pause_all_id(&self) -> tray_icon::menu::MenuId {
-        self.tray
-            .as_ref()
-            .map(|t| t.menu_pause_all_id.clone())
-            .unwrap_or(tray_icon::menu::MenuId::new("pause_all"))
-    }
-    fn tray_resume_all_id(&self) -> tray_icon::menu::MenuId {
-        self.tray
-            .as_ref()
-            .map(|t| t.menu_resume_all_id.clone())
-            .unwrap_or(tray_icon::menu::MenuId::new("resume_all"))
-    }
-    fn tray_quit_id(&self) -> tray_icon::menu::MenuId {
-        self.tray
-            .as_ref()
-            .map(|t| t.menu_quit_id.clone())
-            .unwrap_or(tray_icon::menu::MenuId::new("quit"))
     }
 
     fn save_if_dirty(&mut self) {
@@ -917,13 +911,28 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.drain_log_events(ctx);
         self.handle_tray_events(ctx);
 
+        if self.minimized_to_tray != self.last_applied_skip_taskbar {
+            if let Some(hwnd) = crate::winext::hwnd_from(frame) {
+                crate::winext::set_skip_taskbar(hwnd, self.minimized_to_tray);
+                self.last_applied_skip_taskbar = self.minimized_to_tray;
+                tracing::info!(
+                    "skip_taskbar={} applied (hwnd={:?})",
+                    self.minimized_to_tray,
+                    hwnd
+                );
+            }
+        }
+
         if ctx.input(|i| i.viewport().close_requested()) && !self.quit_requested {
+            tracing::info!("close_requested received, minimizing to tray");
+            self.all_log
+                .push_system("[system] ✕ ボタン押下 → タスクトレイに最小化".into());
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             self.minimized_to_tray = true;
         }
 
@@ -980,4 +989,62 @@ fn chrono_like_timestamp() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     secs.to_string()
+}
+
+fn spawn_tray_listener(
+    ctx: egui::Context,
+    queue: Arc<Mutex<Vec<TrayAction>>>,
+    show_id: MenuId,
+    sync_all_id: MenuId,
+    pause_all_id: MenuId,
+    resume_all_id: MenuId,
+    quit_id: MenuId,
+) {
+    tracing::info!("tray event handlers registered");
+    let menu_queue = queue.clone();
+    let menu_ctx = ctx.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let id = &event.id;
+        let action = if id == &show_id {
+            Some(TrayAction::Show)
+        } else if id == &sync_all_id {
+            Some(TrayAction::SyncAll)
+        } else if id == &pause_all_id {
+            Some(TrayAction::PauseAll)
+        } else if id == &resume_all_id {
+            Some(TrayAction::ResumeAll)
+        } else if id == &quit_id {
+            Some(TrayAction::Quit)
+        } else {
+            None
+        };
+        tracing::info!(
+            "MenuEvent received: id={:?}, mapped_action={:?}",
+            id,
+            action
+        );
+        if let Some(a) = action {
+            let is_quit = matches!(a, TrayAction::Quit);
+            menu_queue.lock().unwrap().push(a);
+            menu_ctx.request_repaint();
+            if is_quit {
+                tracing::warn!("Quit requested. Force-exit fallback armed (1.5s)");
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    tracing::warn!("Graceful shutdown timed out, calling std::process::exit(0)");
+                    std::process::exit(0);
+                });
+            }
+        }
+    }));
+
+    let tray_queue = queue;
+    let tray_ctx = ctx;
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        tracing::debug!("TrayIconEvent received: {:?}", event);
+        if let TrayIconEvent::DoubleClick { .. } = event {
+            tray_queue.lock().unwrap().push(TrayAction::Show);
+            tray_ctx.request_repaint();
+        }
+    }));
 }

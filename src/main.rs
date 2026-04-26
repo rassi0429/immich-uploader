@@ -8,12 +8,43 @@ mod config;
 mod process;
 mod single_instance;
 mod tray;
+mod winext;
 
 use anyhow::Result;
 use eframe::egui;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::FmtSubscriber;
+
+fn init_logging() -> Option<WorkerGuard> {
+    let dir = directories::ProjectDirs::from("", "", "immich-auto-uploader")
+        .map(|d| d.data_local_dir().join("logs"));
+    let (writer, guard) = match &dir {
+        Some(d) => {
+            if let Err(e) = std::fs::create_dir_all(d) {
+                eprintln!("[warn] ログディレクトリ作成失敗 ({}): {e}", d.display());
+            }
+            let file_appender = tracing_appender::rolling::daily(d, "app.log");
+            let (nb, g) = tracing_appender::non_blocking(file_appender);
+            (Some(nb), Some(g))
+        }
+        None => (None, None),
+    };
+    let builder = FmtSubscriber::builder()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_target(true)
+        .with_thread_names(true);
+    let _ = if let Some(w) = writer {
+        builder.with_writer(w).with_ansi(false).try_init()
+    } else {
+        builder.with_writer(std::io::stderr).try_init()
+    };
+    if let Some(d) = dir {
+        eprintln!("[info] ログ出力先: {}", d.join("app.log").display());
+    }
+    guard
+}
 
 fn install_japanese_fonts(ctx: &egui::Context) {
     const CANDIDATES: &[&str] = &[
@@ -46,10 +77,8 @@ fn install_japanese_fonts(ctx: &egui::Context) {
 }
 
 fn main() -> Result<()> {
-    let _ = FmtSubscriber::builder()
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(std::io::stderr)
-        .try_init();
+    let _log_guard = init_logging();
+    tracing::info!("=== immich-auto-uploader starting ===");
 
     let _instance_guard = match single_instance::SingleInstanceGuard::try_acquire() {
         Some(g) => g,
@@ -95,7 +124,13 @@ fn main() -> Result<()> {
                     None
                 }
             };
-            Ok(Box::new(app::App::new(cfg, warning, rt_handle, tray)))
+            Ok(Box::new(app::App::new(
+                cfg,
+                warning,
+                rt_handle,
+                tray,
+                cc.egui_ctx.clone(),
+            )))
         }),
     );
 
